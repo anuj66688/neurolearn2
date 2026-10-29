@@ -1,0 +1,191 @@
+// ==========================================
+// NeuroLearn — Firestore Security Rules
+// ==========================================
+// Deploy via Firebase CLI:
+//   firebase deploy --only firestore:rules
+//
+// OR paste directly into:
+//   Firebase Console → Firestore Database → Rules tab
+// ==========================================
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HELPER FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Is the requester signed in to Firebase Auth?
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Fetch the caller's role from their Firestore user doc
+    function getRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    // Is the caller a student?
+    function isStudent() {
+      return isSignedIn() && getRole() == 'student';
+    }
+
+    // Is the caller a teacher?
+    function isTeacher() {
+      return isSignedIn() && getRole() == 'teacher';
+    }
+
+    // Is the caller an admin?
+    function isAdmin() {
+      return isSignedIn() && getRole() == 'admin';
+    }
+
+    // Is the caller accessing their own document?
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // USERS COLLECTION  (/users/{uid})
+    // Stores: { uid, name, email, role, avatarUrl, createdAt }
+    // ─────────────────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      // Anyone signed in can read their own profile
+      allow read: if isOwner(uid);
+
+      // Teachers can read any user profile (to see their students)
+      allow read: if isTeacher();
+
+      // Admins can read and write any user profile
+      allow read, write: if isAdmin();
+
+      // A user can create their own doc on first registration (student self-signup)
+      // Enforce that they cannot set themselves as teacher/admin
+      allow create: if isOwner(uid)
+                    && request.resource.data.role == 'student'
+                    && request.resource.data.uid == uid;
+
+      // A user can update their own doc but cannot change their role
+      allow update: if isOwner(uid)
+                    && request.resource.data.role == resource.data.role
+                    && request.resource.data.uid == uid;
+
+      // Only admins can delete user docs
+      allow delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STUDENT PROFILES  (/studentProfiles/{uid})
+    // Stores the AI-generated StudentProfile for each student
+    // ─────────────────────────────────────────────────────────────────────────
+    match /studentProfiles/{uid} {
+      allow read, write: if isOwner(uid) && isStudent();
+      allow read:        if isTeacher();
+      allow read, write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PERFORMANCE DATA  (/performance/{uid})
+    // Stores PerformanceData — quiz averages, topic breakdowns, trends
+    // ─────────────────────────────────────────────────────────────────────────
+    match /performance/{uid} {
+      allow read, write: if isOwner(uid) && isStudent();
+      allow read:        if isTeacher();
+      allow read, write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // QUIZ RESULTS  (/quizResults/{resultId})
+    // Written by the Quiz Agent after each quiz submission
+    // ─────────────────────────────────────────────────────────────────────────
+    match /quizResults/{resultId} {
+      // Students can create their own results and read only their own
+      allow create: if isSignedIn()
+                    && isStudent()
+                    && request.resource.data.studentId == request.auth.uid;
+
+      allow read: if isSignedIn()
+                  && isStudent()
+                  && resource.data.studentId == request.auth.uid;
+
+      // Teachers can read all quiz results (for their analytics dashboard)
+      allow read: if isTeacher();
+
+      // Admins have full access
+      allow read, write, delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // QUIZZES  (/quizzes/{quizId})
+    // AI-generated quiz sets; readable by students, written by agent pipeline
+    // ─────────────────────────────────────────────────────────────────────────
+    match /quizzes/{quizId} {
+      // Any signed-in user can read quizzes
+      allow read: if isSignedIn();
+
+      // Students can create quizzes (triggered by agent pipeline on their behalf)
+      allow create: if isStudent();
+
+      // Teachers and admins can create/update/delete quizzes
+      allow create, update, delete: if isTeacher() || isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STUDY PLANS  (/studyPlans/{uid})
+    // AI Study Planner Agent generates and updates this doc per student
+    // ─────────────────────────────────────────────────────────────────────────
+    match /studyPlans/{uid} {
+      allow read, write: if isOwner(uid) && isStudent();
+      allow read:        if isTeacher();
+      allow read, write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RECOMMENDATIONS  (/recommendations/{docId})
+    // Recommendation Agent creates docs keyed as "{uid}_{recId}"
+    // ─────────────────────────────────────────────────────────────────────────
+    match /recommendations/{docId} {
+      // Students read only their own recommendations
+      allow read: if isSignedIn()
+                  && isStudent()
+                  && resource.data.studentId == request.auth.uid;
+
+      // Students / agents can create recommendations for themselves
+      allow create: if isSignedIn()
+                    && isStudent()
+                    && request.resource.data.studentId == request.auth.uid;
+
+      // Students can update their own (e.g. mark as completed)
+      allow update: if isSignedIn()
+                    && isStudent()
+                    && resource.data.studentId == request.auth.uid;
+
+      // Teachers can read all recommendations
+      allow read: if isTeacher();
+
+      // Admins have full access
+      allow read, write, delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LEARNING PROGRESS  (/learningProgress/{uid})
+    // Aggregated progress updated by the Progress Agent
+    // ─────────────────────────────────────────────────────────────────────────
+    match /learningProgress/{uid} {
+      allow read, write: if isOwner(uid) && isStudent();
+      allow read:        if isTeacher();
+      allow read, write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SUBJECTS CATALOGUE  (/subjects/{subjectId})
+    // Shared content catalogue — readable by all, writable only by admins
+    // ─────────────────────────────────────────────────────────────────────────
+    match /subjects/{subjectId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
